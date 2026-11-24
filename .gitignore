@@ -1,0 +1,12 @@
+# Local settings, recovery data and diagnostic logs
+data/
+*.log
+
+# Generated build and release files
+*.exe
+*.zip
+bin/
+obj/
+.vs/
+*.user
+*.suo
