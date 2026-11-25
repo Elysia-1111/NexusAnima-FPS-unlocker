@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-A small tool for raising the frame-rate limit in the Windows version of **Honkai: Nexus Anima**, developed by **MissPinkElf**.
+PC games still locked to 60 FPS in 2026? A small tool for raising the frame-rate limit in the Windows version of **Honkai: Nexus Anima**, developed by **MissPinkElf**.
 
 Set a custom limit of **1–240 FPS** (default: **240**). The tool automatically remembers your last frame rate and game path. After the game starts, it hides in the system tray and maintains your chosen frame rate in the background. Exiting the tool normally restores the game's original frame-rate limit, usually 60 FPS.
 
