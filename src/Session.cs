@@ -50,6 +50,7 @@ namespace NexusAnima240
         internal int Original;
         internal readonly int Target;
         internal bool WasWritten;
+        internal int? LastConfirmedValue;
         internal Action<int> BeforeWrite;
         internal FpsLease(IntPtr handle, long address, int original, int target)
         {
@@ -61,7 +62,7 @@ namespace NexusAnima240
         internal void Apply()
         {
             int current = Current;
-            if (current == Target) return;
+            if (current == Target) { LastConfirmedValue=current; return; }
             if (!Profile.PlausibleOriginal(current)) throw new InvalidOperationException("运行中的帧率值异常，已停止: " + current);
             // The game can select its real cap after the loading screen. Remember each new
             // game-supplied value before overriding it; never restore an earlier loading cap.
@@ -73,6 +74,7 @@ namespace NexusAnima240
             // Track the write before attempting it so partial failures still enter the rollback path.
             WasWritten = true;
             Native.WriteInt(Handle, Address, Target);
+            LastConfirmedValue=Target;
         }
         internal string Restore()
         {
@@ -89,16 +91,19 @@ namespace NexusAnima240
     internal sealed class Session : IDisposable
     {
         internal int Pid;
-        internal long Created, ModuleBase;
+        internal long Created;
         internal string GamePath;
         internal IntPtr Handle;
         internal FpsLease Lease;
+        internal WorkerBridge Worker;
         internal bool Active;
         internal bool Launched;
         internal bool Restored;
         internal string RestoreMessage;
         private Mutex writerMutex;
         private bool ownsMutex;
+        private IntPtr startupThread;
+        internal int? ConfirmedTarget { get { return Worker==null || Worker.State!=2 ? (int?)null : Worker.Current; } }
 
         private void LockWriter()
         {
@@ -135,102 +140,81 @@ namespace NexusAnima240
                 Profile.CheckFile(unityPath);
                 Native.StartupInfo startup=new Native.StartupInfo(); startup.cb=(uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.StartupInfo));
                 Native.ProcessInfo created;
-                // Normal process creation: retain the handle supplied by Windows. No suspended launch,
-                // injection, code patching, privilege adjustment, or game protection changes.
-                if (!Native.CreateProcess(s.GamePath,new StringBuilder("\""+s.GamePath+"\""),IntPtr.Zero,IntPtr.Zero,false,0,IntPtr.Zero,Path.GetDirectoryName(s.GamePath),ref startup,out created))
+                // Prepare the FPS module using the handles returned for this launch,
+                // then always resume the primary thread, including on setup failure.
+                if (!Native.CreateProcess(s.GamePath,new StringBuilder("\""+s.GamePath+"\""),IntPtr.Zero,IntPtr.Zero,false,4,IntPtr.Zero,Path.GetDirectoryName(s.GamePath),ref startup,out created))
                     throw Native.Error("启动游戏失败");
-                s.Handle=created.Process; s.Pid=created.Pid; Native.CloseHandle(created.Thread);
+                s.Handle=created.Process; s.Pid=created.Pid;s.startupThread=created.Thread;
                 s.Launched=true;
                 s.Created=Native.CreationTime(s.Handle);
-                Files.Log("Launched original game pid="+s.Pid+"; retained CreateProcess handle.");
-                progress("游戏已启动，等待引擎加载和帧率初始化…");
-                Stopwatch timer=Stopwatch.StartNew();
-                Exception last=null;
-                while (timer.Elapsed.TotalSeconds<90)
+                Files.Log("Created game pid="+s.Pid+" with startup preparation enabled.");
+                progress("正在准备帧率模块…");
+                try{s.Worker=WorkerBridge.PrepareStartup(s.Handle,s.startupThread,s.Pid,target);}
+                finally{s.ResumeStartup();}
+                progress("游戏已启动，等待引擎准备就绪…");
+                s.Worker.WaitUntilReady(delegate
                 {
-                    if (cancel()) throw new OperationCanceledException("已取消等待；游戏继续正常运行。");
-                    if (!s.Alive) throw new InvalidOperationException("游戏在初始化阶段已退出，请从官方启动器检查游戏状态。");
-                    try
-                    {
-                        s.ModuleBase=Native.FindUnityModule(s.Handle,unityPath);
-                        if (s.ModuleBase!=0 && timer.Elapsed.TotalSeconds>=5)
-                        {
-                            Profile.CheckMemory(s.Handle,s.ModuleBase);
-                            int current=Native.ReadInt(s.Handle,s.ModuleBase+Profile.FpsRva);
-                            if (Profile.PlausibleOriginal(current) && current>0)
-                            {
-                                s.RecoverPrevious();
-                                current=Native.ReadInt(s.Handle,s.ModuleBase+Profile.FpsRva);
-                                s.Lease=new FpsLease(s.Handle,s.ModuleBase+Profile.FpsRva,current,target);
-                                Files.Log("Launch validation passed pid="+s.Pid+" original="+current);
-                                return s;
-                            }
-                        }
-                    }
-                    catch (Win32Exception e)
-                    {
-                        last=e;
-                        if (e.NativeErrorCode==5 && timer.Elapsed.TotalSeconds>=10)
-                            throw new InvalidOperationException("启动时取得的句柄仍被拒绝读取。当前保护不支持此方法，未修改游戏。",e);
-                    }
-                    Thread.Sleep(200);
-                }
-                throw new InvalidOperationException("等待引擎初始化超时。"+(last==null ? "" : " 最后错误："+last.Message));
+                    if(!s.Alive)throw new InvalidOperationException("游戏在初始化阶段已退出。");
+                    return cancel();
+                });
+                s.Lease=new FpsLease(s.Handle,0,s.Worker.Original,target);
+                if(File.Exists(Files.JournalPath))File.Delete(Files.JournalPath);
+                Files.Log("Game worker validated engine; original="+s.Worker.Original+".");
+                return s;
             }
             catch { s.Dispose(); throw; }
         }
 
-        private void RecoverPrevious()
+        private void ResumeStartup()
         {
-            if (!File.Exists(Files.JournalPath)) return;
-            RestoreRecord record;
-            try { record = Files.Load<RestoreRecord>(Files.JournalPath); }
-            catch (Exception e) { throw new InvalidOperationException("恢复记录损坏，已拒绝覆盖，请保留 data 目录用于排查。", e); }
-            if (record.Pid == Pid && record.Created == Created)
-            {
-                if (record.Hash != Profile.Hash) throw new InvalidOperationException("恢复记录的引擎版本不匹配。");
-                var recovery = new FpsLease(Handle, ModuleBase + Profile.FpsRva, record.Original, record.Target);
-                recovery.WasWritten = true;
-                Files.Log("Recovered previous session: " + recovery.Restore());
-            }
-            File.Delete(Files.JournalPath);
+            if(startupThread==IntPtr.Zero)return;
+            if(Native.ResumeThread(startupThread)==UInt32.MaxValue)throw Native.Error("继续启动游戏失败");
+            Native.CloseHandle(startupThread);startupThread=IntPtr.Zero;
+            Files.Log("Primary game thread resumed.");
         }
 
         internal bool Alive
         {
-            get { uint code; return Handle != IntPtr.Zero && Native.GetExitCodeProcess(Handle, out code) && code == 259; }
+            get
+            {
+                if (Handle==IntPtr.Zero) return false;
+                uint code;
+                if (!Native.GetExitCodeProcess(Handle,out code)) throw Native.Error("无法确认游戏运行状态");
+                return code==259;
+            }
         }
 
         internal void Start()
         {
             if (Active) return;
-            Profile.CheckMemory(Handle, ModuleBase);
             if (!Alive) throw new InvalidOperationException("游戏已退出。");
             Files.Save(Files.JournalPath, new RestoreRecord { Pid=Pid, Created=Created, Original=Lease.Original, Target=Lease.Target, Hash=Profile.Hash });
-            Lease.BeforeWrite=delegate(int original)
-            {
-                Files.Save(Files.JournalPath,new RestoreRecord {Pid=Pid,Created=Created,Original=original,Target=Lease.Target,Hash=Profile.Hash});
-                Files.Log("Captured game-selected restore target="+original);
-            };
             Active = true;
-            try { Lease.Apply(); Files.Log("Enabled target=" + Lease.Target); }
+            try { Worker.Start();SynchronizeWorker();Files.Log("Enabled in-process target=" + Lease.Target); }
             catch { Stop(); throw; }
         }
 
         internal void Reconfigure(int target)
         {
-            if (Active) throw new InvalidOperationException("请先停止当前解锁。");
-            if (!Alive) throw new InvalidOperationException("游戏已退出。");
-            Profile.CheckMemory(Handle,ModuleBase);
-            Lease=new FpsLease(Handle,ModuleBase+Profile.FpsRva,Native.ReadInt(Handle,ModuleBase+Profile.FpsRva),target);
-            Restored=false; RestoreMessage=null;
+            throw new InvalidOperationException("请正常退出游戏后，再选择新的帧率启动。");
+        }
+
+        private void SynchronizeWorker()
+        {
+            int original=Worker.Original;
+            if(Worker.WasWritten && original!=Lease.Original)
+            {
+                Files.Save(Files.JournalPath,new RestoreRecord {Pid=Pid,Created=Created,Original=original,Target=Lease.Target,Hash=Profile.Hash});
+                Files.Log("Worker captured game-selected restore target="+original);
+            }
+            Lease.Original=original;Lease.LastConfirmedValue=Worker.Current;Lease.WasWritten=Worker.WasWritten;
         }
 
         internal void Tick()
         {
             if (!Active) return;
             if (!Alive) { Stop(); throw new InvalidOperationException("游戏已退出，已停止解锁。"); }
-            Lease.Apply();
+            Worker.Tick();SynchronizeWorker();
         }
 
         internal string Stop()
@@ -241,8 +225,11 @@ namespace NexusAnima240
             {
                 if (Alive)
                 {
-                    Profile.CheckMemory(Handle, ModuleBase);
-                    RestoreMessage = Lease.Restore();
+                    bool restored=Worker.Stop();
+                    Lease.Original=Worker.Original;Lease.LastConfirmedValue=Worker.Current;
+                    if(!restored)throw new InvalidOperationException("帧率模块未确认恢复完成，当前帧率状态无法确认。");
+                    Lease.WasWritten=false;
+                    RestoreMessage=Worker.RestoreResult==1 ? "已恢复游戏帧率 "+Worker.Current+"。" : Worker.RestoreResult==2 ? "保留游戏后来选择的帧率设置。" : "未修改帧率，无需恢复。";
                 }
                 else RestoreMessage = "游戏进程已退出，临时修改已随进程清除。";
                 Restored = true;
@@ -261,7 +248,9 @@ namespace NexusAnima240
 
         public void Dispose()
         {
+            if(startupThread!=IntPtr.Zero){try{ResumeStartup();}catch(Exception e){Files.Log(e.ToString());}}
             if (Active) Stop();
+            if (Worker!=null){Worker.Dispose();Worker=null;}
             if (Handle != IntPtr.Zero) { Native.CloseHandle(Handle); Handle = IntPtr.Zero; }
             if (writerMutex != null) { if (ownsMutex) writerMutex.ReleaseMutex(); writerMutex.Dispose(); writerMutex = null; ownsMutex = false; }
         }

@@ -16,7 +16,7 @@ Set a custom limit of **1–240 FPS** (default: **240**). The tool automatically
 
 1. **Download and extract**
 
-   Open this repository's **[Releases](https://github.com/Elysia-1111/NexusAnima-FPS-unlocker/releases/latest)** page and download the latest attached package, **`NexusAnimaFPS-MissPinkElf-v1.1.zip`**. Extract the entire archive into a separate folder of your choice. It does not need to be inside the game folder.
+   Open this repository's **[Releases](https://github.com/Elysia-1111/NexusAnima-FPS-unlocker/releases/latest)** page and download the latest attached package, **`NexusAnimaFPS-MissPinkElf-v1.2.zip`**. Extract the entire archive into a separate folder of your choice. It does not need to be inside the game folder.
 
 2. **Launch the game**
 
@@ -61,12 +61,12 @@ Make sure the game is fully closed. Reopen the tool and allow it to run as admin
 
 **Q: What if the original frame-rate limit is not restored after I exit the tool?**
 
-Exiting normally restores the original limit automatically. If a tool crash prevents this, simply close the game normally and open it again to reset the limit.
+Exiting normally restores the original limit automatically. The tool also attempts to restore it after an unexpected exit. If the limit is still not restored, close the game normally and open it again to reset it.
 
 ## Updating and removing the tool
 
 - **Update:** Exit the game first, then right-click the tray icon and exit the old tool. Extract the new ZIP into the existing folder and replace the old files. If you use a new folder, you will need to set the game path again. The tool does not update automatically.
-- **Remove:** This is a portable app with no uninstaller required. Exit the tool, then delete its entire folder.
+- **Remove:** This is a portable app with no uninstaller required. Exit both the game and the tool normally, then delete the tool's entire folder.
 
 ## Reporting problems
 

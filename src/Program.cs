@@ -15,8 +15,9 @@ namespace NexusAnima240
     [DataContract] internal sealed class Sample
     {
         [DataMember] public string Time;
-        [DataMember] public int MemoryTarget;
+        [DataMember] public int? MemoryTarget;
         [DataMember] public double? MeasuredFps;
+        [DataMember] public string State;
     }
     [DataContract] internal sealed class Report
     {
@@ -26,6 +27,9 @@ namespace NexusAnima240
         [DataMember] public int? AfterRestoreTarget;
         [DataMember] public double? BeforeFps, AfterRestoreFps;
         [DataMember] public List<Sample> Samples = new List<Sample>();
+        [DataMember] public bool Finished;
+        [DataMember] public int WorkerWrites;
+        [DataMember] public double ObservationSeconds;
     }
 
     internal static class Program
@@ -69,50 +73,64 @@ namespace NexusAnima240
 
         private static int CommandLine(string[] args)
         {
-            string mode = "launch-run";
+            string mode = "launch-run-worker";
             var report = new Report { Mode=mode, Time=DateTimeOffset.Now.ToString("o"), Administrator=IsAdmin, EngineHash=Profile.Hash };
             string reportPath = Option(args, "--report", Path.Combine(Files.DataDir, mode + ".json"));
             Session session = null;
+            var observation = new Stopwatch();
             try
             {
                 report.RequestedTarget = ParseTarget(args);
-                int seconds = Int32.Parse(Option(args, "--seconds", "12"));
-                if (seconds < 1 || seconds > 60) throw new ArgumentException("测试持续时间须为 1–60 秒。");
+                int seconds = Int32.Parse(Option(args, "--seconds", "180"));
+                if (seconds < 1 || seconds > 600) throw new ArgumentException("测试持续时间须为 1–600 秒。");
                 session=Session.Launch(Option(args,"--game-path",GameLocator.Resolve(AppSettings.Load().GamePath)),report.RequestedTarget,Files.Log,delegate { return false; });
                 report.ProcessId=session.Pid;
                 Thread.Sleep(2500);
                 report.BeforeFps=Rtss.ReadFps(session.Pid);
                 report.VerifiedProfile = true;
                 report.OriginalTarget = session.Lease.Original;
-                if (mode == "launch-run")
+                session.Start(); report.Applied = session.ConfirmedTarget.HasValue;
+                observation.Start();
+                long nextSample = 0, nextSave = 0;
+                while (observation.Elapsed.TotalSeconds < seconds)
                 {
-                    session.Start(); report.Applied = true;
-                    var timer = Stopwatch.StartNew();
-                    long nextSample = 0;
-                    while (timer.Elapsed.TotalSeconds < seconds)
+                    session.Tick();
+                    if (session.ConfirmedTarget.HasValue) report.Applied = true;
+                    if (observation.ElapsedMilliseconds >= nextSample)
                     {
-                        session.Tick();
-                        if (timer.ElapsedMilliseconds >= nextSample)
-                        {
-                            report.Samples.Add(new Sample { Time=DateTimeOffset.Now.ToString("o"), MemoryTarget=session.Lease.Current, MeasuredFps=Rtss.ReadFps(session.Pid) });
-                            nextSample = timer.ElapsedMilliseconds + 1000;
-                        }
-                        Thread.Sleep(100);
+                        report.Samples.Add(new Sample { Time=DateTimeOffset.Now.ToString("o"), MemoryTarget=session.ConfirmedTarget, MeasuredFps=Rtss.ReadFps(session.Pid), State="active" });
+                        nextSample = observation.ElapsedMilliseconds + 1000;
                     }
+                    if (observation.ElapsedMilliseconds >= nextSave)
+                    {
+                        report.ObservationSeconds=observation.Elapsed.TotalSeconds;
+                        report.WorkerWrites=session.Worker.Writes;
+                        Files.Save(reportPath,report); nextSave=observation.ElapsedMilliseconds+5000;
+                    }
+                    Thread.Sleep(100);
                 }
-                else report.Samples.Add(new Sample { Time=DateTimeOffset.Now.ToString("o"), MemoryTarget=session.Lease.Current, MeasuredFps=Rtss.ReadFps(session.Pid) });
             }
             catch (Exception e) { report.Error = e.Message; Files.Log(e.ToString()); }
             finally
             {
+                observation.Stop();
                 if (session != null)
                 {
-                    if (session.Active) { report.RestoreMessage=session.Stop(); report.Restored=session.Restored; }
-                    if (session.Lease!=null) report.OriginalTarget=session.Lease.Original;
-                    if (session.Alive && report.Restored) report.AfterRestoreTarget=session.Lease.Current;
-                    session.Dispose();
+                    try
+                    {
+                        if (session.Active) { report.RestoreMessage=session.Stop(); report.Restored=session.Restored; }
+                        if (session.Lease!=null) report.OriginalTarget=session.Lease.Original;
+                        if (session.Alive && report.Restored && session.Worker!=null) report.AfterRestoreTarget=session.Worker.Current;
+                    }
+                    catch(Exception e) { report.Error=(report.Error==null ? "" : report.Error+"; ")+"结束验证时："+e.Message; Files.Log(e.ToString()); }
+                    finally
+                    {
+                        if(session.Worker!=null)report.WorkerWrites=session.Worker.Writes;
+                        session.Dispose();
+                    }
                     if (report.Applied) { Thread.Sleep(3500); report.AfterRestoreFps=Rtss.ReadFps(report.ProcessId); }
                 }
+                report.ObservationSeconds=observation.Elapsed.TotalSeconds; report.Finished=true;
                 Files.Save(reportPath, report);
             }
             return report.Error == null && (!report.Applied || report.Restored) ? 0 : 1;

@@ -268,7 +268,7 @@ namespace NexusAnima240
                 starting=true;start.Enabled=false;fps.ReadOnly=true;settingsButton.Enabled=false;start.Text="正在启动…";
                 session=Session.Launch(settings.GamePath,value,delegate(string message){status.Text="正在等待游戏准备就绪…";Files.Log(message);},delegate {Application.DoEvents();return closing;});
                 if(closing){session.Dispose();session=null;return;}
-                session.Start();start.Text="游戏运行中";status.Text="目标 "+value+" FPS · 关闭工具将恢复游戏设定";
+                session.Start();start.Text="游戏运行中";UpdateSessionStatus();
                 HideToTray();
             }
             catch(Exception e)
@@ -295,15 +295,22 @@ namespace NexusAnima240
             {
                 if(!session.Alive){session.Stop();session.Dispose();session=null;start.Text="启动游戏";start.Enabled=true;fps.ReadOnly=false;settingsButton.Enabled=true;status.Text="游戏已退出 · 已恢复默认状态";trayIcon.Text=Text;return;}
                 session.Tick();
+                UpdateSessionStatus();
             }
             catch(Exception e)
             {
                 Files.Log(e.ToString());string restore=session.Stop();session.Dispose();session=null;
                 start.Text="启动游戏";start.Enabled=true;fps.ReadOnly=false;settingsButton.Enabled=true;
-                status.Text="解锁已停止 · 请退出游戏后重试";tips.SetToolTip(status,e.Message+"\n"+restore);
+                status.Text="解锁已停止 · 将鼠标移至此处查看原因";tips.SetToolTip(status,e.Message+"\n"+restore);
                 trayIcon.Text=Text;
                 if(trayIcon.Visible)ShowFromTray();
             }
+        }
+        private void UpdateSessionStatus()
+        {
+            if(session==null || !session.Active)return;
+            status.Text="目标 "+session.Lease.Target+" FPS · 关闭工具将恢复游戏设定";
+            trayIcon.Text=Text+" · "+session.Lease.Target+" FPS";
         }
         internal void RenderPreview(string path)
         {

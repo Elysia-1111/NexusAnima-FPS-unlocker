@@ -11,6 +11,7 @@ namespace NexusAnima240
     {
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError=true)] internal static extern uint ResumeThread(IntPtr thread);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool ReadProcessMemory(IntPtr handle, IntPtr address, byte[] buffer, UIntPtr size, out UIntPtr read);
         [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool WriteProcessMemory(IntPtr handle, IntPtr address, byte[] buffer, UIntPtr size, out UIntPtr written);
         [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] internal static extern bool QueryFullProcessImageName(IntPtr handle, uint flags, StringBuilder path, ref uint size);
@@ -124,8 +125,10 @@ namespace NexusAnima240
         internal static byte[] Read(IntPtr h, long address, int size)
         {
             byte[] data = new byte[size]; UIntPtr read;
-            if (!ReadProcessMemory(h, new IntPtr(address), data, (UIntPtr)size, out read) || read.ToUInt64() != (ulong)size)
+            if (!ReadProcessMemory(h, new IntPtr(address), data, (UIntPtr)size, out read))
                 throw Error("读取帧率内存失败");
+            if (read.ToUInt64() != (ulong)size)
+                throw new Win32Exception(299,"读取帧率内存不完整，已停止本次操作。");
             return data;
         }
 
@@ -141,8 +144,10 @@ namespace NexusAnima240
                 address < info.BaseAddress.ToInt64() || address + 4 > info.BaseAddress.ToInt64() + (long)info.RegionSize.ToUInt64())
                 throw new InvalidOperationException("帧率地址不在可写数据页，已停止。");
             UIntPtr written;
-            if (!WriteProcessMemory(h, new IntPtr(address), BitConverter.GetBytes(value), (UIntPtr)4, out written) || written.ToUInt64() != 4)
+            if (!WriteProcessMemory(h, new IntPtr(address), BitConverter.GetBytes(value), (UIntPtr)4, out written))
                 throw Error("写入帧率失败");
+            if (written.ToUInt64() != 4)
+                throw new Win32Exception(299,"写入帧率不完整，已保留恢复记录。");
             if (ReadInt(h, address) != value) throw new InvalidOperationException("帧率写入回读不一致，已停止。");
         }
     }
